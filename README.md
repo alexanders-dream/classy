@@ -138,18 +138,6 @@ This application provides a user-friendly interface to:
     *   Download the results as a CSV or Excel file.
     *   View workflow-specific statistics (Theme distribution for HF, summary counts for LLM).
 
-## File Structure
-
-classy/
-├── app.py # Main Streamlit application file, UI logic.
-├── config.py # Configuration constants (endpoints, defaults, hierarchy levels).
-├── hf_classifier.py # Functions for Hugging Face training, saving, loading, rules, classification.
-├── llm_classifier.py # Functions for LLM client setup, model fetching, suggestions, classification (using LangChain).
-├── requirements.txt # Python package dependencies.
-├── ui_components.py # Reusable Streamlit UI components (LLM sidebar, hierarchy editor).
-└── utils.py # Utility functions (data loading, state management, hierarchy manipulation, stats).
-└── .env # (You create this) For storing API keys and sensitive config.
-
 
 ## Troubleshooting
 
