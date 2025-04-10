@@ -326,67 +326,80 @@ def parse_predicted_labels_to_columns(predicted_labels_list: List[List[str]]) ->
 
 
 # --- ADDED function for HF Stats ---
-def display_classification_stats(results_df: pd.DataFrame, raw_labels_list: List[List[str]]):
-    """Displays aggregate statistics and distribution chart for classification results."""
-    # (Implementation remains the same as provided previously)
-    st.subheader("📊 Classification Statistics")
+# --- *** NEW Hierarchical Statistics Function *** ---
+def display_hierarchical_stats(results_df: pd.DataFrame, prefix: str = ""):
+    """
+    Calculates and displays hierarchical statistics (Theme, Category, Segment, Subsegment).
 
-    if results_df is None or raw_labels_list is None:
-        st.warning("No classification results available to display statistics.")
+    Args:
+        results_df: DataFrame containing the classification results.
+        prefix: The prefix added to the hierarchy column names (e.g., "HF_", "LLM_").
+    """
+    #st.subheader(f"📊 {prefix.replace('_',' ')}Hierarchical Statistics")
+
+    if results_df is None or results_df.empty:
+        st.warning("No results data available to generate statistics.")
         return
 
-    all_labels = [
-        label for sublist in raw_labels_list
-        for label in sublist if label and isinstance(label, str) and "Classification Error" not in label
-    ]
+    # Define column names based on prefix
+    theme_col = f"{prefix}Theme"
+    cat_col = f"{prefix}Category"
+    seg_col = f"{prefix}Segment"
+    subseg_col = f"{prefix}Subsegment" # Assuming Subsegment is the key in df
 
-    if not all_labels:
-        st.warning("No valid classifications were made to display statistics.")
+    hierarchy_cols = [theme_col, cat_col, seg_col, subseg_col]
+
+    # Check if required columns exist
+    missing_cols = [col for col in hierarchy_cols if col not in results_df.columns]
+    if missing_cols:
+        st.error(f"Cannot generate hierarchical stats. Missing columns: {', '.join(missing_cols)}")
         return
 
-    try:
-        # Lazy import plotly inside the function if needed
-        import plotly.express as px
-        label_counts = pd.Series(all_labels).value_counts().reset_index()
-        label_counts.columns = ['Label', 'Count']
-        label_counts = label_counts.sort_values(by='Count', ascending=False)
+    total_rows = len(results_df)
+    st.caption(f"Based on {total_rows:,} processed rows.")
 
-        st.markdown("#### Distribution of Predicted Labels (Raw Prefixed)")
-        if not label_counts.empty:
-            fig = px.bar(label_counts.head(30), x='Label', y='Count',
-                         title='Frequency of Each Predicted Label (Top 30)',
-                         labels={'Count': 'Number of Occurrences', 'Label': 'Classification Label (Prefixed)'},
-                         color='Count', color_continuous_scale=px.colors.sequential.Viridis)
-            fig.update_layout(xaxis_title="Label", yaxis_title="Count")
-            st.plotly_chart(fig, use_container_width=True)
+    # 1. Theme Distribution
+    st.markdown("#### Theme Distribution")
+    theme_counts = results_df[theme_col].value_counts(dropna=True)
+    if not theme_counts.empty:
+        # Simple Bar Chart for Themes
+        st.bar_chart(theme_counts)
+        with st.expander("View Theme Counts Table"):
+            st.dataframe(theme_counts.reset_index().rename(columns={'index':'Theme', theme_col:'Count'}), use_container_width=True)
+    else:
+        st.info("No Themes were assigned.")
 
-            with st.expander("Show All Label Counts"):
-                st.dataframe(label_counts, use_container_width=True, height=300)
-        else:
-            st.info("No labels found to plot distribution.")
+    st.markdown("---")
 
-        st.markdown("#### Summary Metrics")
-        total_docs = len(results_df)
-        total_classifications = len(all_labels)
-        docs_with_classification = sum(1 for sublist in raw_labels_list if sublist and isinstance(sublist[0], str) and "Classification Error" not in sublist[0])
+    """
+    # 2. Category Distribution (Nested under Theme)
+    st.markdown("#### Category Distribution (within Themes)")
+    # Group by Theme, then count Categories within each Theme
+    cat_grouped = results_df.dropna(subset=[theme_col, cat_col]).groupby([theme_col])[cat_col].value_counts()
+    if not cat_grouped.empty:
+        # Display using expanders for each theme
+        unique_themes = results_df[theme_col].dropna().unique()
+        for theme in sorted(unique_themes):
+            with st.expander(f"Categories within Theme: **{theme}**"):
+                theme_cat_counts = cat_grouped.get(theme)
+                if theme_cat_counts is not None and not theme_cat_counts.empty:
+                    st.dataframe(theme_cat_counts.reset_index(name='Count'), use_container_width=True)
+                else:
+                    st.caption(f"No Categories assigned under Theme '{theme}'.")
+    else:
+        st.info("No Category assignments found within Themes.")
 
+    st.markdown("---")
 
-        avg_labels_per_classified_doc = total_classifications / docs_with_classification if docs_with_classification > 0 else 0
-        avg_labels_per_doc = total_classifications / total_docs if total_docs > 0 else 0
-        unique_labels_count = label_counts['Label'].nunique() if not label_counts.empty else 0
+    # 3. Segment Distribution (Nested under Theme & Category)
+    st.markdown("#### Segment Distribution (within Categories)")
+    seg_grouped = results_df.dropna(subset=[theme_col, cat_col, seg_col]).groupby([theme_col, cat_col])[seg_col].value_counts()
+    if not seg_grouped.empty:
+        # Further nesting expanders can get deep, maybe just show table or top N
+        st.caption("Showing counts grouped by Theme and Category.")
+        st.dataframe(seg_grouped.reset_index(name='Count'), use_container_width=True, height=300)
+    else:
+        st.info("No Segment assignments found within Categories.")
+    """
 
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            st.metric("Total Documents Processed", f"{total_docs:,}")
-            st.metric("Documents with >=1 Label", f"{docs_with_classification:,}")
-        with col2:
-            st.metric("Total Valid Classifications", f"{total_classifications:,}")
-            st.metric("Avg. Labels per Doc", f"{avg_labels_per_doc:.2f}")
-        with col3:
-             st.metric("Avg. Labels / Classified Doc", f"{avg_labels_per_classified_doc:.2f}")
-             st.metric("Unique Labels Predicted", f"{unique_labels_count:,}")
-
-    except Exception as e:
-         st.error(f"Error generating classification statistics: {e}")
-         st.error(traceback.format_exc())
-# --- End of added function ---
+    st.markdown("---")

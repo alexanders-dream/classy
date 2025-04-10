@@ -260,14 +260,16 @@ def generate_hierarchy_suggestion(llm_client: Any, sample_texts: List[str]) -> O
         return None
 
 
-# --- LLM Text Classification ---
+# --- LLM Text Classification (Batch Processing) ---
 def classify_texts_with_llm(
     df: pd.DataFrame,
     text_column: str,
     hierarchy_dict: Dict[str, Any],
-    llm_client: Any
+    llm_client: Any,
+    batch_size: int = 10, # Configurable batch size
+    max_concurrency: int = 5 # Max parallel requests (tune based on provider limits)
     ) -> Optional[pd.DataFrame]:
-    """Classifies text in a DataFrame using the LLM and a defined hierarchy."""
+    """Classifies text in a DataFrame using the LLM and a defined hierarchy with batch processing."""
 
     if df is None or df.empty or not text_column or not hierarchy_dict or not llm_client:
         st.error("LLM Classify: Missing inputs (DataFrame, text column, hierarchy, or LLM client).")
@@ -291,7 +293,8 @@ def classify_texts_with_llm(
     """
 
     categorization_parser = PydanticOutputParser(pydantic_object=LLMCategorizationResult)
-    categorization_fixing_parser = OutputFixingParser.from_llm(parser=categorization_parser, llm=llm_client)
+    # OutputFixingParser might be less reliable in batch mode if many fail; handle parsing errors manually
+    # categorization_fixing_parser = OutputFixingParser.from_llm(parser=categorization_parser, llm=llm_client)
 
     categorization_prompt = PromptTemplate(
         template=categorization_prompt_template,
@@ -319,77 +322,107 @@ def classify_texts_with_llm(
         else:
             st.warning(f"Column '{df_col}' already exists. Output will overwrite it.")
 
-
     total_rows = len(df_to_process)
-    st.info(f"LLM Classify: Starting categorization for {total_rows} rows...")
-    progress_bar = st.progress(0, text="Initializing LLM Categorization...")
-    results = []
+    st.info(f"LLM Classify: Starting batch categorization for {total_rows} rows (Batch Size: {batch_size}, Concurrency: {max_concurrency})...")
+    progress_bar = st.progress(0, text="Initializing LLM Batch Categorization...")
+    all_results_parsed = []
     error_count = 0
-    rate_limit_delay = 1 # Simple delay in seconds if rate limit errors occur
+    processed_rows = 0
 
-    with st.spinner("🤖 LLM is categorizing rows..."):
-        for i, row in df_to_process.iterrows():
-            text_to_categorize = str(row[text_column]) if pd.notna(row[text_column]) else ""
-            if not text_to_categorize.strip(): # Skip empty text
-                results.append(LLMCategorizationResult().model_dump()) # Append empty result
-                continue
+    # Prepare list of texts to process
+    texts_to_classify_list = df_to_process[text_column].fillna("").astype(str).tolist()
+    original_indices = df_to_process.index.tolist() # Keep track of original indices
 
-            # Simple retry mechanism
-            for attempt in range(3): # Try up to 3 times
-                try:
-                    response = categorization_chain.invoke({
-                        "hierarchy_structure": hierarchy_str,
-                        "text_to_categorize": text_to_categorize
-                    })
-                    raw_output = response['text']
+    with st.spinner(f"🤖 LLM is categorizing in batches..."):
+        for i in range(0, total_rows, batch_size):
+            batch_texts = texts_to_classify_list[i : i + batch_size]
+            batch_indices = original_indices[i : i + batch_size]
 
-                    # Parse the response
-                    try:
-                        parsed_result = categorization_parser.parse(raw_output)
-                    except Exception:
-                        # Use fixing parser on parse failure
-                        parsed_result = categorization_fixing_parser.parse(raw_output)
+            if not batch_texts: continue # Skip empty batches
 
-                    results.append(parsed_result.model_dump())
-                    break # Success, exit retry loop
+            # Create inputs for the batch call
+            batch_inputs = [
+                {
+                    "hierarchy_structure": hierarchy_str,
+                    "text_to_categorize": text
+                }
+                for text in batch_texts if text.strip() # Only include non-empty texts
+            ]
+            # Keep track of indices corresponding to non-empty texts in the batch
+            valid_indices_in_batch = [idx for idx, text in zip(batch_indices, batch_texts) if text.strip()]
 
-                except Exception as e_cat:
-                    error_count += 1
-                    error_msg = str(e_cat)
-                    if "rate limit" in error_msg.lower() or "limit" in error_msg.lower() or "429" in error_msg:
-                         st.warning(f"Rate limit likely hit (Attempt {attempt+1}/3). Waiting {rate_limit_delay}s...")
-                         time.sleep(rate_limit_delay)
-                         rate_limit_delay = min(rate_limit_delay * 2, 10) # Exponential backoff up to 10s
-                         if attempt == 2: # Last attempt failed
-                             st.error(f"LLM Classify Error (Row {i}): Rate limit exceeded after retries.")
-                             results.append(LLMCategorizationResult(reasoning="Error: Rate limit exceeded").model_dump())
-                    else:
-                        st.warning(f"LLM Classify Error (Row {i}, Attempt {attempt+1}/3): {error_msg}. Retrying...")
-                        if attempt == 2: # Last attempt failed
-                            st.error(f"LLM Classify Error (Row {i}): Failed after retries. Error: {error_msg}")
-                            results.append(LLMCategorizationResult(reasoning=f"Error: {error_msg[:150]}").model_dump())
-                        time.sleep(0.5) # Short delay before retry for other errors
+            if not batch_inputs: # If batch only contained empty texts
+                 # Add empty results for all original indices in this batch
+                 all_results_parsed.extend([{'index': idx, **LLMCategorizationResult().model_dump()} for idx in batch_indices])
+                 processed_rows += len(batch_indices)
+                 current_progress = processed_rows / total_rows
+                 progress_bar.progress(current_progress, text=f"Processed {processed_rows}/{total_rows} rows (Skipped empty batch)")
+                 continue
+
+            try:
+                # --- Execute Batch Request ---
+                batch_responses = categorization_chain.batch(
+                    batch_inputs,
+                    config={"max_concurrency": max_concurrency}
+                )
+                # batch_responses is a list of dictionaries, e.g., [{'text': '...'}, {'text': '...'}]
+
+                # --- Process Batch Responses ---
+                if len(batch_responses) != len(batch_inputs):
+                     st.error(f"Batch Error: Mismatch between input ({len(batch_inputs)}) and output ({len(batch_responses)}) count.")
+                     # Add error results for this batch
+                     all_results_parsed.extend([{'index': idx, **LLMCategorizationResult(reasoning="Error: Batch response mismatch").model_dump()} for idx in valid_indices_in_batch])
+                     error_count += len(valid_indices_in_batch)
+                else:
+                    for idx, response in zip(valid_indices_in_batch, batch_responses):
+                        raw_output = response.get('text', '')
+                        try:
+                            parsed_result = categorization_parser.parse(raw_output)
+                            all_results_parsed.append({'index': idx, **parsed_result.model_dump()})
+                        except Exception as e_parse:
+                            st.warning(f"LLM Parse Error (Index {idx}): {e_parse}. Raw: '{raw_output[:100]}...'")
+                            # Attempting to fix might be slow/unreliable in batch, log as error
+                            all_results_parsed.append({'index': idx, **LLMCategorizationResult(reasoning=f"Error: Failed to parse LLM output - {e_parse}").model_dump()})
+                            error_count += 1
+
+                # Add empty results for any empty texts that were skipped *within* this batch run
+                empty_indices_in_batch = [idx for idx, text in zip(batch_indices, batch_texts) if not text.strip()]
+                all_results_parsed.extend([{'index': idx, **LLMCategorizationResult().model_dump()} for idx in empty_indices_in_batch])
 
 
-            # Update progress bar
-            current_progress = (i + 1) / total_rows
-            progress_bar.progress(current_progress, text=f"Processing row {i + 1}/{total_rows}")
+            except Exception as e_batch:
+                st.error(f"LLM Batch Error (Rows {i+1}-{i+batch_size}): {e_batch}")
+                st.error(traceback.format_exc())
+                # Add error results for all valid items in the failed batch
+                all_results_parsed.extend([{'index': idx, **LLMCategorizationResult(reasoning=f"Error: Batch processing failed - {e_batch}").model_dump()} for idx in valid_indices_in_batch])
+                # Add empty results for skipped empty texts
+                empty_indices_in_batch = [idx for idx, text in zip(batch_indices, batch_texts) if not text.strip()]
+                all_results_parsed.extend([{'index': idx, **LLMCategorizationResult().model_dump()} for idx in empty_indices_in_batch])
+                error_count += len(valid_indices_in_batch)
+
+
+            # Update progress
+            processed_rows += len(batch_indices) # Increment by the original batch size
+            current_progress = processed_rows / total_rows
+            progress_bar.progress(current_progress, text=f"Processed {processed_rows}/{total_rows} rows")
 
     progress_bar.progress(1.0, text="Assigning results...")
 
-    if len(results) == total_rows:
-        results_df = pd.DataFrame(results, index=df_to_process.index)
-        # Assign results back to the original DataFrame
+    # --- Consolidate Results ---
+    if len(all_results_parsed) == total_rows:
+        # Create DataFrame from parsed results, ensuring index matches original
+        results_df_final = pd.DataFrame(all_results_parsed).set_index('index')
+        # Assign results back to the original DataFrame columns using the index
         for pydantic_field, df_col in output_cols.items():
-            if pydantic_field in results_df.columns:
-                df_to_process[df_col] = results_df[pydantic_field]
+            if pydantic_field in results_df_final.columns:
+                 # Use .loc for robust index-based assignment
+                 df_to_process.loc[results_df_final.index, df_col] = results_df_final[pydantic_field]
             else:
                  st.warning(f"LLM Classify: Field '{pydantic_field}' missing in LLM results for column '{df_col}'.")
     else:
-        st.error(f"LLM Classify: Number of results ({len(results)}) does not match number of rows ({total_rows}). Cannot assign results.")
+        st.error(f"LLM Classify Error: Number of processed results ({len(all_results_parsed)}) does not match total rows ({total_rows}). Cannot assign results reliably.")
         return None
 
-
     progress_bar.empty()
-    st.success(f"✅ LLM Categorization finished! ({error_count} row errors occurred during processing)")
+    st.success(f"✅ LLM Batch Categorization finished! ({error_count} row errors occurred during processing)")
     return df_to_process
