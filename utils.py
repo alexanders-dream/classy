@@ -5,9 +5,9 @@ import streamlit as st
 import pandas as pd
 from io import BytesIO
 import traceback
-import config # Import your config file
-from typing import List, Dict, Any, Tuple, Optional # <-- Ensure List, Tuple, Optional are imported
-from collections import defaultdict # <-- Ensure defaultdict is imported
+import config
+from typing import List, Dict, Any, Tuple, Optional
+from collections import defaultdict
 
 # --- Session State Management ---
 def init_session_state():
@@ -61,7 +61,6 @@ def init_session_state():
 
     # --- Hierarchy State (Used by both, but defined/edited primarily for LLM) ---
     if 'hierarchy_df' not in st.session_state:
-        # Correct the column name here during initialization
         st.session_state.hierarchy_df = pd.DataFrame(columns=['Theme', 'Category', 'Segment', 'Subsegment', 'Keywords'])
     if 'hierarchy_defined' not in st.session_state:
         st.session_state.hierarchy_defined = False # Is the hierarchy valid?
@@ -84,12 +83,12 @@ def init_session_state():
 def restart_session():
     """Clears relevant parts of the session state to simulate a restart."""
     st.info("Ending session and clearing state...")
-    # Keep only essential settings maybe? Or clear all? Let's clear most things.
+    # Define keys to remove from session state for a clean restart
     keys_to_clear = [
         'categorized_df', 'uncategorized_df', 'results_df',
         'cat_text_col', 'uncat_text_col',
         'hf_model', 'hf_tokenizer', 'hf_label_map', 'hf_rules', 'hf_model_ready',
-        'llm_client', 'llm_models', 'llm_selected_model_name', #'llm_provider', 'llm_endpoint', 'llm_api_key', # Keep API config? Maybe clear key.
+        'llm_client', 'llm_models', 'llm_selected_model_name', # Keep provider/endpoint/key? Cleared for now.
         'hierarchy_df', 'hierarchy_defined', 'ai_suggestion_pending',
         'app_stage', 'raw_predicted_labels',
         'categorized_file_key', 'uncategorized_file_key'
@@ -170,19 +169,31 @@ def df_to_excel_bytes(df: pd.DataFrame) -> bytes:
 
 # --- Hierarchy Manipulation ---
 def build_hierarchy_from_df(df: pd.DataFrame) -> Dict[str, Any]:
-    """Converts flat hierarchy DataFrame (from editor) back to nested dict.
-       Handles potential column name inconsistencies for 'Subsegment'.
     """
-    # (Keep the corrected version from the previous response that handles 'Sub-Segment')
+    Converts a flat hierarchy DataFrame (e.g., from a Streamlit data editor)
+    back into a nested dictionary structure suitable for LLM processing.
+
+    Handles potential column name inconsistencies for 'Subsegment' (accepts 'Sub-Segment').
+
+    Args:
+        df: Pandas DataFrame with columns like 'Theme', 'Category', 'Segment',
+            'Subsegment' (or 'Sub-Segment'), and 'Keywords'.
+
+    Returns:
+        A nested dictionary representing the hierarchy (e.g., {'themes': [...]}).
+        Returns {'themes': []} if the input DataFrame is empty or None.
+    """
     if df is None or df.empty:
         return {'themes': []}
 
     hierarchy = {'themes': []}
-    themes_dict = defaultdict(lambda: {'name': '', 'categories': defaultdict(lambda: {'name': '', 'segments': defaultdict(lambda: {'name': '', 'sub_segments': []})})})
+    # Use 'subsegments' key to match Pydantic model
+    themes_dict = defaultdict(lambda: {'name': '', 'categories': defaultdict(lambda: {'name': '', 'segments': defaultdict(lambda: {'name': '', 'subsegments': []})})})
 
     required_base_cols = ['Theme', 'Category', 'Segment']
-    subsegment_key = "Subsegment" # Preferred key
-    subsegment_display_key = "Sub-Segment" # Potential display key
+    # Standardize to 'Subsegment' for DataFrame column name
+    subsegment_key = "Subsegment"
+    subsegment_display_key = "Sub-Segment" # Still check for this legacy name during input
     keywords_key = "Keywords"
 
     df_processed = df.copy()
@@ -216,9 +227,10 @@ def build_hierarchy_from_df(df: pd.DataFrame) -> Dict[str, Any]:
         segments_dict = categories_dict[cat_name]['segments']
         segments_dict[seg_name]['name'] = seg_name
 
-        sub_segments_list = segments_dict[seg_name]['sub_segments']
-        if not any(ss['name'] == sub_seg_name for ss in sub_segments_list):
-             sub_segments_list.append({'name': sub_seg_name, 'keywords': keywords})
+        # Use 'subsegments' key here
+        subsegments_list = segments_dict[seg_name]['subsegments']
+        if not any(ss['name'] == sub_seg_name for ss in subsegments_list):
+             subsegments_list.append({'name': sub_seg_name, 'keywords': keywords})
         processed_rows += 1
 
     if skipped_rows > 0: st.info(f"Build Hierarchy: Skipped {skipped_rows} rows due to missing path names.")
@@ -229,7 +241,8 @@ def build_hierarchy_from_df(df: pd.DataFrame) -> Dict[str, Any]:
         for cat_name, cat_data in theme_data['categories'].items():
             final_segments = []
             for seg_name, seg_data in cat_data['segments'].items():
-                 if seg_data['sub_segments']: final_segments.append({'name': seg_data['name'], 'sub_segments': seg_data['sub_segments']})
+                 # Check and use 'subsegments' key
+                 if seg_data['subsegments']: final_segments.append({'name': seg_data['name'], 'subsegments': seg_data['subsegments']})
             if final_segments: final_categories.append({'name': cat_data['name'], 'segments': final_segments})
         if final_categories: final_themes.append({'name': theme_data['name'], 'categories': final_categories})
 
@@ -240,9 +253,9 @@ def build_hierarchy_from_df(df: pd.DataFrame) -> Dict[str, Any]:
 
 def flatten_hierarchy(nested_hierarchy: Dict[str, Any]) -> pd.DataFrame:
     """Converts AI-generated nested hierarchy dict to a flat DataFrame for the editor."""
-    # (Keep the corrected version from the previous response)
     rows = []
-    required_cols = ['Theme', 'Category', 'Segment', 'Subsegment', 'Keywords'] # Use consistent key
+    # Standardize required column name to 'Subsegment'
+    required_cols = ['Theme', 'Category', 'Segment', 'Subsegment', 'Keywords']
 
     if not nested_hierarchy or 'themes' not in nested_hierarchy:
         return pd.DataFrame(columns=required_cols)
@@ -260,9 +273,10 @@ def flatten_hierarchy(nested_hierarchy: Dict[str, Any]) -> pd.DataFrame:
                     seg_name = segment.get('name', '').strip()
                     if not seg_name: continue
 
-                    if not segment.get('sub_segments'): continue # Skip segments without subsegments
+                    # Expect 'subsegments' key from Pydantic model
+                    if not segment.get('subsegments'): continue # Skip segments without subsegments
                     else:
-                        for sub_segment in segment.get('sub_segments', []):
+                        for sub_segment in segment.get('subsegments', []):
                             sub_seg_name = sub_segment.get('name', '').strip()
                             if not sub_seg_name: continue
 
@@ -273,7 +287,8 @@ def flatten_hierarchy(nested_hierarchy: Dict[str, Any]) -> pd.DataFrame:
                                 'Theme': theme_name,
                                 'Category': cat_name,
                                 'Segment': seg_name,
-                                'Subsegment': sub_seg_name, # Use consistent key
+                                # Use 'Subsegment' for DataFrame column name
+                                'Subsegment': sub_seg_name,
                                 'Keywords': keywords_str
                             })
     except Exception as e:
@@ -284,15 +299,33 @@ def flatten_hierarchy(nested_hierarchy: Dict[str, Any]) -> pd.DataFrame:
     return pd.DataFrame(rows, columns=required_cols)
 
 
-# --- ADDED function ---
-def parse_predicted_labels_to_columns(predicted_labels_list: List[List[str]]) -> List[Dict[str, str | None]]:
-    """Parses prefixed labels (e.g., 'Theme: X') into structured dictionaries."""
+# --- Hierarchy Parsing ---
+def parse_predicted_labels_to_columns(predicted_labels_list: List[List[str]]) -> List[Dict[str, Optional[str]]]:
+    """
+    Parses lists of predicted labels, potentially prefixed (e.g., 'Theme: X', 'Category: Y'),
+    into structured dictionaries, one per original input row.
+
+    It uses the hierarchy levels defined in `config.HIERARCHY_LEVELS` to identify
+    and extract the correct label for each level. If multiple labels for the same
+    level are found in a single prediction list, only the first one is used.
+
+    Args:
+        predicted_labels_list: A list where each element is a list of string labels
+                               predicted for a single input text.
+
+    Returns:
+        A list of dictionaries. Each dictionary corresponds to an input text and
+        has keys matching the hierarchy levels (e.g., 'Theme', 'Category'),
+        with the extracted label as the value, or None if no label for that level
+        was found.
+    """
     structured_results = []
-    # Use HIERARCHY_LEVELS from config
-    prefixes = {level: f"{level.lower()}:" for level in config.HIERARCHY_LEVELS} # Use lowercase for matching
+    # Create lowercase prefixes like "theme:", "category:" for matching
+    prefixes = {level: f"{level.lower()}:" for level in config.HIERARCHY_LEVELS}
 
     for labels in predicted_labels_list:
-        row_dict = {key: None for key in config.HIERARCHY_LEVELS} # Initialize with None for each level
+        # Initialize dict with None for all expected hierarchy levels
+        row_dict: Dict[str, Optional[str]] = {level: None for level in config.HIERARCHY_LEVELS}
         if not labels:
             structured_results.append(row_dict)
             continue
@@ -322,21 +355,21 @@ def parse_predicted_labels_to_columns(predicted_labels_list: List[List[str]]) ->
         structured_results.append(row_dict)
 
     return structured_results
-# --- End of added function ---
-
-
-# --- ADDED function for HF Stats ---
-# --- *** NEW Hierarchical Statistics Function *** ---
+# --- Statistics Display ---
 def display_hierarchical_stats(results_df: pd.DataFrame, prefix: str = ""):
     """
-    Calculates and displays hierarchical statistics (Theme, Category, Segment, Subsegment).
+    Calculates and displays hierarchical statistics for classified data.
+
+    Focuses on the distribution at the 'Theme' level using value counts and a bar chart.
+    Assumes the results DataFrame contains columns named using the provided prefix
+    followed by the hierarchy level (e.g., "LLM_Theme", "HF_Category").
 
     Args:
-        results_df: DataFrame containing the classification results.
-        prefix: The prefix added to the hierarchy column names (e.g., "HF_", "LLM_").
+        results_df: DataFrame containing the classification results. Must include
+                    columns corresponding to the hierarchy levels prefixed as specified.
+        prefix: The prefix added to the hierarchy column names in the results_df
+                (e.g., "HF_", "LLM_"). Defaults to "".
     """
-    #st.subheader(f"📊 {prefix.replace('_',' ')}Hierarchical Statistics")
-
     if results_df is None or results_df.empty:
         st.warning("No results data available to generate statistics.")
         return
@@ -369,37 +402,7 @@ def display_hierarchical_stats(results_df: pd.DataFrame, prefix: str = ""):
     else:
         st.info("No Themes were assigned.")
 
-    st.markdown("---")
+    # Removed commented-out sections for Category/Segment distribution for clarity.
+    # These could be added back if more detailed nested stats are required.
 
-    """
-    # 2. Category Distribution (Nested under Theme)
-    st.markdown("#### Category Distribution (within Themes)")
-    # Group by Theme, then count Categories within each Theme
-    cat_grouped = results_df.dropna(subset=[theme_col, cat_col]).groupby([theme_col])[cat_col].value_counts()
-    if not cat_grouped.empty:
-        # Display using expanders for each theme
-        unique_themes = results_df[theme_col].dropna().unique()
-        for theme in sorted(unique_themes):
-            with st.expander(f"Categories within Theme: **{theme}**"):
-                theme_cat_counts = cat_grouped.get(theme)
-                if theme_cat_counts is not None and not theme_cat_counts.empty:
-                    st.dataframe(theme_cat_counts.reset_index(name='Count'), use_container_width=True)
-                else:
-                    st.caption(f"No Categories assigned under Theme '{theme}'.")
-    else:
-        st.info("No Category assignments found within Themes.")
-
-    st.markdown("---")
-
-    # 3. Segment Distribution (Nested under Theme & Category)
-    st.markdown("#### Segment Distribution (within Categories)")
-    seg_grouped = results_df.dropna(subset=[theme_col, cat_col, seg_col]).groupby([theme_col, cat_col])[seg_col].value_counts()
-    if not seg_grouped.empty:
-        # Further nesting expanders can get deep, maybe just show table or top N
-        st.caption("Showing counts grouped by Theme and Category.")
-        st.dataframe(seg_grouped.reset_index(name='Count'), use_container_width=True, height=300)
-    else:
-        st.info("No Segment assignments found within Categories.")
-    """
-
-    st.markdown("---")
+    st.markdown("---") # Add a visual separator

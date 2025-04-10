@@ -2,7 +2,7 @@
 """Configuration constants for the application."""
 
 import os
-from pathlib import Path # Import Path
+from pathlib import Path
 
 # --- User Home Directory & Base Save Path ---
 # Use pathlib.Path.home() for cross-platform compatibility
@@ -30,7 +30,7 @@ DEFAULT_OLLAMA_MODEL = "llama3:latest"
 
 # --- Classification Defaults ---
 DEFAULT_LLM_TEMPERATURE = 0.1
-DEFAULT_HF_THRESHOLD = 0.5 # Reiterate HF threshold
+DEFAULT_HF_THRESHOLD = 0.5 # Default confidence threshold for HF predictions
 
 # --- UI Defaults ---
 DEFAULT_LLM_SAMPLE_SIZE = 200

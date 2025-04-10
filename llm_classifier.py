@@ -9,7 +9,7 @@ from typing import List, Dict, Optional, Any
 
 # LangChain components
 from langchain_groq import ChatGroq
-from langchain_community.chat_models import ChatOllama # Correct import for Ollama
+from langchain_community.chat_models import ChatOllama
 from langchain_core.prompts import PromptTemplate
 from langchain.chains import LLMChain
 from langchain_core.output_parsers import PydanticOutputParser
@@ -24,7 +24,7 @@ class AISuggestionSubSegment(BaseModel):
 
 class AISuggestionSegment(BaseModel):
     name: str = Field(..., description="Name of the segment")
-    sub_segments: List[AISuggestionSubSegment] = Field(..., description="List of sub-segments within this segment")
+    subsegments: List[AISuggestionSubSegment] = Field(..., description="List of subsegments within this segment")
 
 class AISuggestionCategory(BaseModel):
     name: str = Field(..., description="Name of the category")
@@ -37,7 +37,6 @@ class AISuggestionTheme(BaseModel):
 class AISuggestionHierarchy(BaseModel):
     """Structure for the AI to generate the hierarchy."""
     themes: List[AISuggestionTheme] = Field(..., description="The complete hierarchical structure.")
-    # Add validators if needed for stricter generation
 
 # Model for single row categorization result
 class LLMCategorizationResult(BaseModel):
@@ -45,7 +44,7 @@ class LLMCategorizationResult(BaseModel):
     theme: Optional[str] = Field(None, description="Assigned theme, or null/None if not applicable.")
     category: Optional[str] = Field(None, description="Assigned category, or null/None if not applicable.")
     segment: Optional[str] = Field(None, description="Assigned segment, or null/None if not applicable.")
-    subsegment: Optional[str] = Field(None, description="Assigned sub-segment, or null/None if not applicable.") # Corrected key
+    subsegment: Optional[str] = Field(None, description="Assigned sub-segment, or null/None if not applicable.")
     reasoning: Optional[str] = Field(None, description="Brief explanation for the categorization.")
 
 
@@ -54,6 +53,7 @@ class LLMCategorizationResult(BaseModel):
 def initialize_llm_client(provider: str, endpoint: str, api_key: Optional[str], model_name: str):
     """Initializes and returns the LangChain LLM client."""
     st.info(f"LLM Init: Initializing client for {provider} - Model: {model_name}")
+    llm = None # Initialize llm to None
     try:
         if provider == "Groq":
             if not api_key:
@@ -75,13 +75,12 @@ def initialize_llm_client(provider: str, endpoint: str, api_key: Optional[str], 
             )
             # Simple check if Ollama endpoint is reachable (optional)
             try:
-                requests.get(endpoint, timeout=5)
+                requests.get(endpoint, timeout=5) # Quick check if endpoint is responsive
             except requests.exceptions.ConnectionError:
                  st.warning(f"LLM Init Warning: Cannot reach Ollama endpoint at {endpoint}. Ensure Ollama is running.")
-                 # Return the client anyway, maybe it starts later
+                 # Proceeding anyway, as Ollama might start later or be accessible by the LangChain lib differently
             except Exception as e_check:
-                 st.warning(f"LLM Init Warning: Error checking Ollama endpoint: {e_check}")
-
+                 st.warning(f"LLM Init Warning: Error during optional check of Ollama endpoint: {e_check}")
 
         # Add other providers here (e.g., OpenAI, Gemini)
         # elif provider == "OpenAI":
@@ -93,11 +92,16 @@ def initialize_llm_client(provider: str, endpoint: str, api_key: Optional[str], 
             st.error(f"LLM Init Error: Unsupported provider '{provider}'")
             return None
 
-        # Simple invocation test
-        st.info("LLM Init: Testing client connection...")
-        llm.invoke("Respond with OK")
-        st.success(f"✅ LLM Client ({provider} - {model_name}) Initialized Successfully.")
-        return llm
+        if llm: # Only test if llm was successfully initialized
+            # Simple invocation test to confirm basic connectivity and authentication
+            st.info("LLM Init: Testing client connection with a simple request...")
+            llm.invoke("Respond with 'OK'") # Use single quotes for clarity
+            st.success(f"✅ LLM Client ({provider} - {model_name}) Initialized and Responding.")
+            return llm
+        else:
+             # This case should ideally be caught by the provider checks, but as a safeguard:
+             st.error(f"LLM Init Error: Client for {provider} could not be initialized.")
+             return None
 
     except Exception as e:
         st.error(f"🔴 LLM Init Error: Failed to initialize {provider} client: {e}")
@@ -117,7 +121,7 @@ def fetch_available_models(provider: str, endpoint: str, api_key: Optional[str])
                 st.error("Cannot fetch Groq models: API key missing.")
                 return []
             # Groq uses OpenAI compatible endpoint for models
-            url = "https://api.groq.com/openai/v1/models" # Use the correct base for models if different
+            url = "https://api.groq.com/openai/v1/models"
             headers = {"Authorization": f"Bearer {api_key}"}
             response = requests.get(url, headers=headers, timeout=10)
             response.raise_for_status() # Raise error for bad status codes
@@ -130,9 +134,11 @@ def fetch_available_models(provider: str, endpoint: str, api_key: Optional[str])
             response = requests.get(url, timeout=10)
             response.raise_for_status()
             data = response.json()
-            # Filter for models that seem usable (heuristic: avoid embeddings models if named obviously)
-            models = sorted([model['name'] for model in data.get('models', []) if 'embed' not in model.get('details',{}).get('family','').lower()])
-
+            # Basic filtering heuristic: exclude models likely intended for embeddings based on name/family
+            models = sorted([
+                model['name'] for model in data.get('models', [])
+                if 'embed' not in model.get('details', {}).get('family', '').lower()
+            ])
 
         # Add other providers here
         # elif provider == "OpenAI": ...
@@ -156,13 +162,15 @@ def fetch_available_models(provider: str, endpoint: str, api_key: Optional[str])
         try:
             st.error(f"Response body: {e.response.text}") # Show error details from API
             if e.response.status_code == 401 and provider == "Groq":
-                 st.error("Check your Groq API Key.")
-        except: pass
-        return []
+                 st.error("Authentication Error (401): Please check your Groq API Key.")
+        except Exception as inner_e:
+            # Avoid crashing if response.text is not available or causes another error
+            st.warning(f"Could not display full error response body: {inner_e}")
+        return [] # Return empty list on HTTP error
     except Exception as e:
         st.error(f"An unexpected error occurred fetching models: {e}")
         st.error(traceback.format_exc())
-        return []
+        return [] # Return empty list on other exceptions
 
 
 # --- Hierarchy Formatting for Prompt ---
@@ -179,9 +187,9 @@ def format_hierarchy_for_prompt(hierarchy: Dict[str, Any]) -> str:
                 prompt_string += f"  Category: {category.get('name', 'N/A')}\n"
                 for segment in category.get('segments', []):
                     prompt_string += f"    Segment: {segment.get('name', 'N/A')}\n"
-                    for sub_segment in segment.get('sub_segments', []):
+                    for sub_segment in segment.get('subsegments', []): # Uses 'subsegments' key from Pydantic model
                         keywords_str = ', '.join(sub_segment.get('keywords', [])) if sub_segment.get('keywords') else 'N/A'
-                        prompt_string += f"      Subsegment: {sub_segment.get('name', 'N/A')} (Keywords: {keywords_str})\n" # Corrected key
+                        prompt_string += f"      Subsegment: {sub_segment.get('name', 'N/A')} (Keywords: {keywords_str})\n"
                 prompt_string += "\n" # Space between categories
             prompt_string += "---\n" # Separator between themes
     except Exception as e:
@@ -240,19 +248,20 @@ def generate_hierarchy_suggestion(llm_client: Any, sample_texts: List[str]) -> O
         try:
             parsed_hierarchy = parser.parse(raw_output)
             st.success("✅ LLM response parsed successfully.")
-            return parsed_hierarchy.model_dump() # Return as dict
+            return parsed_hierarchy.model_dump() # Return as a standard dictionary
         except Exception as e_parse:
-            st.warning(f"LLM Suggestion: Initial parse failed: {e_parse}. Attempting to fix...")
+            st.warning(f"LLM Suggestion: Initial Pydantic parse failed: {e_parse}. Attempting automated fix...")
             try:
+                # Use LangChain's fixer which asks the LLM to correct the format
                 fixing_parser = OutputFixingParser.from_llm(parser=parser, llm=llm_client)
                 parsed_hierarchy = fixing_parser.parse(raw_output)
-                st.success("✅ Successfully parsed with OutputFixingParser.")
-                return parsed_hierarchy.model_dump() # Return as dict
+                st.success("✅ Successfully parsed hierarchy using OutputFixingParser.")
+                return parsed_hierarchy.model_dump() # Return as a standard dictionary
             except Exception as e_fix:
-                st.error(f"🔴 LLM Suggestion: Failed to parse or fix AI output: {e_fix}")
+                st.error(f"🔴 LLM Suggestion: OutputFixingParser also failed: {e_fix}")
                 st.error("Raw AI Response that failed parsing:")
                 st.code(raw_output, language='json')
-                return None
+                return None # Return None if fixing fails
 
     except Exception as e:
         st.error(f"🔴 LLM Suggestion: Unexpected error during generation: {e}")
@@ -266,10 +275,24 @@ def classify_texts_with_llm(
     text_column: str,
     hierarchy_dict: Dict[str, Any],
     llm_client: Any,
-    batch_size: int = 10, # Configurable batch size
-    max_concurrency: int = 5 # Max parallel requests (tune based on provider limits)
+    batch_size: int = 10, # Number of texts to process in one LLM call
+    max_concurrency: int = 5 # Max parallel LLM requests allowed simultaneously
     ) -> Optional[pd.DataFrame]:
-    """Classifies text in a DataFrame using the LLM and a defined hierarchy with batch processing."""
+    """
+    Classifies text in a DataFrame using the LLM, a defined hierarchy, and batch processing.
+
+    Args:
+        df: Input DataFrame.
+        text_column: Name of the column containing text to classify.
+        hierarchy_dict: Nested dictionary defining the classification structure.
+        llm_client: Initialized LangChain LLM client.
+        batch_size: How many rows to send to the LLM in each batch request.
+        max_concurrency: Maximum number of concurrent requests to the LLM provider.
+
+    Returns:
+        A DataFrame with added columns for LLM classification results (Theme, Category, etc.)
+        or None if a critical error occurs.
+    """
 
     if df is None or df.empty or not text_column or not hierarchy_dict or not llm_client:
         st.error("LLM Classify: Missing inputs (DataFrame, text column, hierarchy, or LLM client).")
@@ -293,8 +316,8 @@ def classify_texts_with_llm(
     """
 
     categorization_parser = PydanticOutputParser(pydantic_object=LLMCategorizationResult)
-    # OutputFixingParser might be less reliable in batch mode if many fail; handle parsing errors manually
-    # categorization_fixing_parser = OutputFixingParser.from_llm(parser=categorization_parser, llm=llm_client)
+    # Note: Using OutputFixingParser in batch mode can be slow if many items fail parsing.
+    # It's often better to handle parse errors individually after the batch returns.
 
     categorization_prompt = PromptTemplate(
         template=categorization_prompt_template,
@@ -307,15 +330,18 @@ def classify_texts_with_llm(
     df_to_process = df.copy()
     hierarchy_str = format_hierarchy_for_prompt(hierarchy_dict)
     if "Error:" in hierarchy_str or "No hierarchy defined" in hierarchy_str:
-         st.error(f"LLM Classify: Invalid hierarchy structure provided for prompt: {hierarchy_str}")
-         return None
+        st.error(f"LLM Classify: Invalid hierarchy structure provided for prompt: {hierarchy_str}")
+        return None
 
-    # Define output columns
+    # Define mapping from Pydantic fields to DataFrame column names
     output_cols = {
-        'theme': 'LLM_Theme', 'category': 'LLM_Category', 'segment': 'LLM_Segment',
-        'subsegment': 'LLM_Subsegment', 'reasoning': 'LLM_Reasoning' # Corrected key
-    }
-    # Add columns if they don't exist, handle potential conflicts
+         'theme': 'LLM_Theme',
+         'category': 'LLM_Category',
+         'segment': 'LLM_Segment',
+         'subsegment': 'LLM_Subsegment', # Matches Pydantic field name
+         'reasoning': 'LLM_Reasoning'
+     }
+    # Add output columns to the DataFrame if they don't exist, handling potential conflicts
     for df_col in output_cols.values():
         if df_col not in df_to_process.columns:
             df_to_process[df_col] = pd.NA # Use pandas NA for better type handling
@@ -420,9 +446,11 @@ def classify_texts_with_llm(
             else:
                  st.warning(f"LLM Classify: Field '{pydantic_field}' missing in LLM results for column '{df_col}'.")
     else:
+        # Correctly indented error message and return
         st.error(f"LLM Classify Error: Number of processed results ({len(all_results_parsed)}) does not match total rows ({total_rows}). Cannot assign results reliably.")
-        return None
+        return None # Return None if result count mismatch
 
+    # Correctly indented final block
     progress_bar.empty()
     st.success(f"✅ LLM Batch Categorization finished! ({error_count} row errors occurred during processing)")
-    return df_to_process
+    return df_to_process # Return the processed DataFrame

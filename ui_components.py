@@ -1,9 +1,9 @@
 import streamlit as st
 import pandas as pd
 import os
-import config # Import your config file
-import llm_classifier # Import functions from llm_classifier
-from utils import build_hierarchy_from_df, restart_session # Import from utils
+import config
+import llm_classifier
+from utils import build_hierarchy_from_df, restart_session, flatten_hierarchy
 from typing import Dict, Any
 import traceback
 
@@ -19,102 +19,124 @@ def display_llm_sidebar():
         options=config.SUPPORTED_PROVIDERS,
         index=current_provider_index,
         key="llm_provider_select",
-        help="Choose the LLM service to use."
+        help="Choose the LLM service provider."
     )
-    # Update session state if provider changes
+    # If the provider selection changes, reset related state variables
     if provider != st.session_state.llm_provider:
         st.session_state.llm_provider = provider
-        st.session_state.llm_models = [] # Reset models on provider change
+        st.session_state.llm_models = []
         st.session_state.llm_selected_model_name = None
-        st.session_state.llm_client = None # Reset client
-        # Reset endpoint based on new provider
-        if provider == "Groq": st.session_state.llm_endpoint = config.DEFAULT_GROQ_ENDPOINT
-        elif provider == "Ollama": st.session_state.llm_endpoint = config.DEFAULT_OLLAMA_ENDPOINT
-        # Add other providers...
-        else: st.session_state.llm_endpoint = ""
-        st.rerun() # Rerun to reflect changes
+        st.session_state.llm_client = None
+        # Set the default endpoint for the newly selected provider
+        if provider == "Groq":
+            st.session_state.llm_endpoint = config.DEFAULT_GROQ_ENDPOINT
+        elif provider == "Ollama":
+            st.session_state.llm_endpoint = config.DEFAULT_OLLAMA_ENDPOINT
+        else:
+            st.session_state.llm_endpoint = "" # Handle other potential providers
+        st.rerun() # Rerun the app to apply changes
 
-    # --- API Endpoint ---
+    # --- API Endpoint Input ---
+    # Determine the default endpoint based on the selected provider
     default_endpoint = config.DEFAULT_GROQ_ENDPOINT if provider == "Groq" else config.DEFAULT_OLLAMA_ENDPOINT
-    # Set endpoint in state if not already set for the current provider
+    # Initialize endpoint in session state if it's missing or empty for the current provider
     if 'llm_endpoint' not in st.session_state or not st.session_state.llm_endpoint:
          st.session_state.llm_endpoint = default_endpoint
 
+    # Display the endpoint input field
     endpoint = st.sidebar.text_input(
         "API Endpoint:",
         value=st.session_state.llm_endpoint,
         key="llm_endpoint_input",
-        help="Modify if using a non-default endpoint (e.g., custom Ollama URL)."
+        help="The base URL for the LLM API. Modify for custom Ollama URLs or other endpoints."
     )
+    # If the endpoint changes, reset models and client, then rerun
     if endpoint != st.session_state.llm_endpoint:
          st.session_state.llm_endpoint = endpoint
-         st.session_state.llm_models = [] # Reset models if endpoint changes
+         st.session_state.llm_models = []
          st.session_state.llm_selected_model_name = None
          st.session_state.llm_client = None
          st.rerun()
 
+    # --- API Key Input (Conditional) ---
+    # Determine if the selected provider requires an API key
+    api_key_needed = provider == "Groq" # Extend this logic for other providers like OpenAI
+    api_key_present = False # Flag to track if a key is available for use
 
-    # --- API Key (Conditional for Groq) ---
-    api_key_needed = provider == "Groq" # Add other providers needing keys here
-    api_key_present = False
     if api_key_needed:
-        # Load from environment or secrets first
-        env_api_key = os.getenv("GROQ_API_KEY") or st.secrets.get("GROQ_API_KEY")
+        # Attempt to load the API key from environment variables or Streamlit secrets first
+        env_api_key = os.getenv(f"{provider.upper()}_API_KEY") or st.secrets.get(f"{provider.upper()}_API_KEY")
 
-        # Use session state to allow user input, prioritizing env/secrets
+        # Use the key from env/secrets unless the user has manually entered one in the session
         if env_api_key and not st.session_state.get("llm_api_key_user_override"):
             st.session_state.llm_api_key = env_api_key
-            st.sidebar.success("Groq API Key loaded from environment/secrets.", icon="🔒")
+            st.sidebar.success(f"{provider} API Key loaded from environment/secrets.", icon="🔒")
             api_key_present = True
         else:
-            # Allow user input if not found or overridden
+            # If no key from env/secrets or user override is active, show the input field
             user_api_key = st.sidebar.text_input(
                 f"{provider} API Key:",
                 value=st.session_state.get("llm_api_key", ""),
                 type="password",
                 key="llm_api_key_input",
-                help=f"Required for {provider}. Enter your key here.",
+                help=f"Required for {provider}. Paste your API key here.",
                 placeholder=f"Enter your {provider} API key"
             )
+            # Update session state based on user input
             if user_api_key:
                 st.session_state.llm_api_key = user_api_key
-                st.session_state.llm_api_key_user_override = True # Flag that user provided it
+                st.session_state.llm_api_key_user_override = True # Mark that user provided the key
                 api_key_present = True
             else:
-                st.session_state.llm_api_key = "" # Ensure it's empty if user clears it
+                # If user clears the input, reset the state
+                st.session_state.llm_api_key = ""
                 st.session_state.llm_api_key_user_override = False
-                st.sidebar.warning(f"{provider} API Key is required to fetch models and run classification.")
+                st.sidebar.warning(f"{provider} API Key is required.")
+                # Provide helpful links for common providers
                 if provider == "Groq": st.sidebar.markdown("[Get Groq API Key](https://console.groq.com/keys)")
+                # Add links for other providers if needed
 
-    else: # Provider doesn't need a key (like default Ollama)
+    else:
+        # If the provider doesn't need an API key (e.g., default Ollama)
         st.session_state.llm_api_key = ""
-        api_key_present = True # Treat as "present" for logic flow
+        api_key_present = True # Consider the key requirement met
 
-    # --- Fetch Models ---
-    # Fetch if models are empty or if provider/endpoint/key status changed relevantly
+    # --- Fetch Available Models ---
+    # Determine if models need to be fetched:
+    # 1. If the model list is currently empty.
+    # 2. (Implicitly handled by resets above) If provider, endpoint, or key changes.
     should_fetch = not st.session_state.llm_models
-    if provider == "Groq" and not api_key_present:
-        should_fetch = False # Don't try fetching Groq models without key
-        if st.session_state.llm_models: st.session_state.llm_models = [] # Clear stale models
 
+    # Prevent fetching if a required API key is missing
+    if api_key_needed and not api_key_present:
+        should_fetch = False
+        if st.session_state.llm_models: # Clear any potentially stale models
+            st.session_state.llm_models = []
+
+    # Fetch models if conditions are met
     if should_fetch and st.session_state.llm_endpoint:
-        models = llm_classifier.fetch_available_models(provider, st.session_state.llm_endpoint, st.session_state.llm_api_key if api_key_needed else None)
+        with st.spinner(f"Fetching models for {provider}..."):
+            models = llm_classifier.fetch_available_models(
+                provider,
+                st.session_state.llm_endpoint,
+                st.session_state.llm_api_key if api_key_needed else None
+            )
         if models:
             st.session_state.llm_models = models
-            # Try setting a default model if none is selected
+            # Attempt to set a default model if none is currently selected
             if not st.session_state.get('llm_selected_model_name'):
-                default_model = config.DEFAULT_GROQ_MODEL if provider=="Groq" else config.DEFAULT_OLLAMA_MODEL
+                default_model = config.DEFAULT_GROQ_MODEL if provider == "Groq" else config.DEFAULT_OLLAMA_MODEL
                 if default_model in models:
                     st.session_state.llm_selected_model_name = default_model
-                elif models: # Fallback to first available model
+                elif models: # If default isn't available, use the first model in the list
                     st.session_state.llm_selected_model_name = models[0]
         else:
             st.sidebar.error(f"Could not fetch models for {provider}.")
             if provider == "Ollama": st.sidebar.markdown("[Download Ollama](https://ollama.com/)")
-        # No automatic rerun here, let user select or refresh
+        # Avoid st.rerun() here; let the model selection dropdown update naturally
 
     # --- Model Selection Dropdown ---
-    st.sidebar.markdown("---") # Separator
+    st.sidebar.divider()
     st.sidebar.markdown("**Model Selection**")
 
     current_model_name = st.session_state.get('llm_selected_model_name')
@@ -122,30 +144,38 @@ def display_llm_sidebar():
     if current_model_name and st.session_state.llm_models and current_model_name in st.session_state.llm_models:
         current_model_index = st.session_state.llm_models.index(current_model_name)
 
-    col1, col2 = st.sidebar.columns([4, 1])
-    with col1:
+    # Determine the index for the currently selected model, default to 0 if not found
+    current_model_index = 0
+    if current_model_name and st.session_state.llm_models and current_model_name in st.session_state.llm_models:
+        current_model_index = st.session_state.llm_models.index(current_model_name)
+
+    # Layout for model selection and refresh button
+    col_select, col_refresh = st.sidebar.columns([4, 1])
+
+    with col_select:
         if st.session_state.llm_models:
             selected_model_name = st.selectbox(
                 "Select AI Model:",
                 options=st.session_state.llm_models,
                 index=current_model_index,
                 key="llm_model_select",
-                help="Choose from models available at the endpoint."
+                help="Choose the specific model to use for classification and suggestions."
             )
+            # If the selected model changes, update state and reset the client
             if selected_model_name != st.session_state.get('llm_selected_model_name'):
                  st.session_state.llm_selected_model_name = selected_model_name
-                 st.session_state.llm_client = None # Reset client when model changes
+                 st.session_state.llm_client = None
                  st.rerun()
-
         else:
-            st.error("No models available to select.")
+            st.warning("No models available. Check endpoint/key and refresh.")
             selected_model_name = None
 
-    # Refresh Button
-    with col2:
-        # Small refresh button using markdown for styling
-        st.markdown("<div style='margin-top: 1.8em;'>", unsafe_allow_html=True) # Adjust vertical alignment
+    # Refresh button column
+    with col_refresh:
+        # Add some top margin to align button better with selectbox
+        st.markdown("<div style='margin-top: 1.8em;'></div>", unsafe_allow_html=True)
         if st.button("🔄", help="Refresh available models list", key="refresh_models_button"):
+            # Only refresh if endpoint is set and key is present (if needed)
             if st.session_state.llm_endpoint and (api_key_present if api_key_needed else True):
                  with st.spinner("Fetching models..."):
                      models = llm_classifier.fetch_available_models(
@@ -155,175 +185,152 @@ def display_llm_sidebar():
                      )
                  if models:
                      st.session_state.llm_models = models
-                     # Reset selection if previous model disappears? Or keep it? Let's keep it for now.
                      st.sidebar.success("Models updated!", icon="✅")
                  else:
-                     st.sidebar.error("Failed to fetch.", icon="❗")
-                     st.session_state.llm_models = [] # Clear if fetch failed
-                 st.rerun() # Rerun to update dropdown
+                     st.sidebar.error("Failed to fetch models.", icon="❗")
+                     st.session_state.llm_models = [] # Clear list on failure
+                 st.rerun() # Rerun to update the dropdown with new models
             else:
                 st.sidebar.warning("Cannot refresh: Check endpoint and API key (if required).", icon="⚠️")
-        st.markdown("</div>", unsafe_allow_html=True)
-
 
     # --- Initialize LLM Client ---
     client_ready = False
-    if st.session_state.llm_selected_model_name and st.session_state.llm_endpoint and (api_key_present if api_key_needed else True):
-         # Only initialize if client is None or config changed
+    # Check if all necessary components are available to initialize the client
+    can_initialize = (
+        st.session_state.llm_selected_model_name and
+        st.session_state.llm_endpoint and
+        (api_key_present if api_key_needed else True)
+    )
+
+    if can_initialize:
+         # Initialize only if the client doesn't exist yet (cached) or relevant config changed (handled by resets)
          if st.session_state.llm_client is None:
-             st.session_state.llm_client = llm_classifier.initialize_llm_client(
-                 st.session_state.llm_provider,
-                 st.session_state.llm_endpoint,
-                 st.session_state.llm_api_key if api_key_needed else None,
-                 st.session_state.llm_selected_model_name
-             )
+             with st.spinner("Initializing LLM client..."):
+                 st.session_state.llm_client = llm_classifier.initialize_llm_client(
+                     st.session_state.llm_provider,
+                     st.session_state.llm_endpoint,
+                     st.session_state.llm_api_key if api_key_needed else None,
+                     st.session_state.llm_selected_model_name
+                 )
+         # Check if client initialization was successful
          if st.session_state.llm_client:
              client_ready = True
 
-
-    # --- Display Status and End Session ---
-    st.sidebar.markdown("---")
+    # --- Display Status and End Session Button ---
+    st.sidebar.divider()
     if client_ready:
-        st.sidebar.info(f"Provider: {st.session_state.llm_provider}\nModel: {st.session_state.llm_selected_model_name}")
+        st.sidebar.info(f"Provider: {st.session_state.llm_provider}\n\nModel: {st.session_state.llm_selected_model_name}\n\nStatus: Ready ✅")
     elif st.session_state.llm_selected_model_name:
-         st.sidebar.error("LLM Client not ready. Check configuration (endpoint, API key, model selection).")
+         # If a model is selected but client isn't ready, there's a config issue
+         st.sidebar.error("LLM Client not ready. Check endpoint and API key (if required).")
     else:
+         # If no model is selected yet
          st.sidebar.warning("Select a model to initialize the LLM client.")
 
+    # Button to clear session state and restart the app flow
     if st.sidebar.button("End Session & Clear State", key="end_session_sidebar_button"):
-        restart_session() # Call utility function
+        restart_session()
 
-def flatten_hierarchy(nested_hierarchy: Dict[str, Any]) -> pd.DataFrame:
-    """Converts nested hierarchy dict (from AI) to a flat DataFrame for st.data_editor."""
-    rows = []
-    required_cols = ['Theme', 'Category', 'Segment', 'Sub-Segment', 'Keywords']
-
-    if not nested_hierarchy or 'themes' not in nested_hierarchy:
-        st.warning("Flatten Hierarchy: Input structure is empty or missing 'themes'.")
-        return pd.DataFrame(columns=required_cols)
-
-    try:
-        for theme in nested_hierarchy.get('themes', []):
-            theme_name = theme.get('name', '').strip()
-            if not theme_name: continue # Skip themes without names
-
-            for category in theme.get('categories', []):
-                cat_name = category.get('name', '').strip()
-                if not cat_name: continue # Skip categories without names
-
-                for segment in category.get('segments', []):
-                    seg_name = segment.get('name', '').strip()
-                    if not seg_name: continue # Skip segments without names
-
-                    if not segment.get('sub_segments'):
-                         # Option: Add row with None sub-segment if needed, or just skip
-                         #st.debug(f"Segment '{seg_name}' has no sub-segments. Skipping for flat view.")
-                         continue
-                    else:
-                        for sub_segment in segment.get('sub_segments', []):
-                            sub_seg_name = sub_segment.get('name', '').strip()
-                            if not sub_seg_name: continue # Skip sub-segments without names
-
-                            # Join keywords, ensure they are strings
-                            keywords_list = [str(k).strip() for k in sub_segment.get('keywords', []) if str(k).strip()]
-                            keywords_str = ', '.join(keywords_list)
-
-                            rows.append({
-                                'Theme': theme_name,
-                                'Category': cat_name,
-                                'Segment': seg_name,
-                                'Sub-Segment': sub_seg_name,
-                                'Keywords': keywords_str
-                            })
-    except Exception as e:
-        st.error(f"Error during hierarchy flattening: {e}")
-        st.error(traceback.format_exc())
-        return pd.DataFrame(columns=required_cols) # Return empty on error
-
-    if not rows:
-        st.warning("Flatten Hierarchy: No valid paths found in the hierarchy structure.")
-        return pd.DataFrame(columns=required_cols)
-
-    return pd.DataFrame(rows)
-
+# --- Hierarchy Editor Component ---
 def display_hierarchy_editor(key_prefix="main"):
-    """Displays the hierarchy editor and handles AI suggestion logic."""
+    """
+    Displays the Streamlit data editor for the hierarchy and handles AI suggestion logic.
+
+    Args:
+        key_prefix (str): A prefix for widget keys to avoid collisions if used multiple times.
+
+    Returns:
+        bool: True if the hierarchy is considered defined and valid, False otherwise.
+    """
     st.markdown("Define the Theme -> Category -> Segment -> Subsegment structure. Keywords should be comma-separated.")
 
     # --- Handle Pending AI Suggestion ---
+    # Check if an AI suggestion was generated and is waiting for user action
     if st.session_state.get('ai_suggestion_pending'):
         st.info("🤖 An AI-generated hierarchy suggestion is ready!")
         nested_suggestion = st.session_state.ai_suggestion_pending
-        # Flatten suggestion for display and potential application
+        # Convert the nested suggestion (dict) into a flat DataFrame for preview
         df_suggestion = flatten_hierarchy(nested_suggestion)
 
         st.markdown("**Preview of AI Suggestion:**")
         st.dataframe(df_suggestion, use_container_width=True, height=200)
 
+        # Buttons to apply or discard the suggestion
         col_apply, col_discard = st.columns(2)
         with col_apply:
             if st.button("✅ Apply Suggestion (Replaces Editor)", key=f"{key_prefix}_apply_ai", type="primary"):
-                st.session_state.hierarchy_df = df_suggestion # Replace current df
-                st.session_state.ai_suggestion_pending = None # Clear pending status
-                st.session_state.hierarchy_defined = True # Mark as defined
+                st.session_state.hierarchy_df = df_suggestion # Overwrite the editor's content
+                st.session_state.ai_suggestion_pending = None # Clear the pending flag
+                st.session_state.hierarchy_defined = True # Assume applied suggestion is valid initially
                 st.success("Editor updated with AI suggestion.")
-                st.rerun()
+                st.rerun() # Rerun to show the updated editor
         with col_discard:
              if st.button("❌ Discard Suggestion", key=f"{key_prefix}_discard_ai"):
-                 st.session_state.ai_suggestion_pending = None # Clear pending status
-                 st.rerun()
+                 st.session_state.ai_suggestion_pending = None # Clear the pending flag
+                 st.rerun() # Rerun to remove the suggestion display
         st.divider()
 
     # --- Display Data Editor ---
     st.markdown("**Hierarchy Editor:**")
-    # Provide default empty DataFrame if needed
+    # Initialize the hierarchy DataFrame in session state if it doesn't exist
     if 'hierarchy_df' not in st.session_state or st.session_state.hierarchy_df is None:
          st.session_state.hierarchy_df = pd.DataFrame(columns=['Theme', 'Category', 'Segment', 'Subsegment', 'Keywords'])
 
+    # Display the data editor widget
     edited_df = st.data_editor(
         st.session_state.hierarchy_df,
-        num_rows="dynamic",
+        num_rows="dynamic", # Allow adding/deleting rows
         use_container_width=True,
         key=f"{key_prefix}_hierarchy_editor_widget",
         hide_index=True,
+        # Configure columns, making key levels required
         column_config={
              "Theme": st.column_config.TextColumn(required=True),
              "Category": st.column_config.TextColumn(required=True),
              "Segment": st.column_config.TextColumn(required=True),
-             "Subsegment": st.column_config.TextColumn("Subsegment", required=True), # Corrected key
+             "Subsegment": st.column_config.TextColumn("Subsegment", required=True), # Standardized name
              "Keywords": st.column_config.TextColumn("Keywords (comma-sep)"),
          }
     )
 
-    # --- Update Session State and Validate ---
-    # Use copy to avoid direct mutation issues with caching/reruns
+    # --- Update Session State and Validate on Edit ---
+    # Compare the edited DataFrame with the one currently in session state
+    # Use copies and string conversion for robust comparison
     current_df_copy = st.session_state.hierarchy_df.copy()
     edited_df_copy = edited_df.copy()
 
-    # Convert to string for reliable comparison (handles dtype issues)
     if not current_df_copy.astype(str).equals(edited_df_copy.astype(str)):
-        st.session_state.hierarchy_df = edited_df_copy # Update state with the edited version
+        st.session_state.hierarchy_df = edited_df_copy # Update session state
 
-        # Validate the *edited* structure immediately
+        # Immediately validate the newly edited structure
         temp_nested = build_hierarchy_from_df(st.session_state.hierarchy_df)
-        if temp_nested and temp_nested.get('themes'):
+        # A valid structure should have a 'themes' list, even if empty initially
+        is_valid = bool(temp_nested and 'themes' in temp_nested)
+
+        if is_valid and temp_nested.get('themes'):
             st.session_state.hierarchy_defined = True
-            st.success("Hierarchy changes saved.")
-        else:
+            st.success("Hierarchy changes saved and structure appears valid.")
+        elif is_valid: # Structure exists but no themes yet
+             st.session_state.hierarchy_defined = False
+             st.info("Hierarchy changes saved. Add at least one full path (Theme to Subsegment).")
+        else: # build_hierarchy_from_df returned None or invalid dict
             st.session_state.hierarchy_defined = False
-            st.warning("Hierarchy is empty or invalid after edits. Define at least one full path.")
-        st.rerun() # Rerun to reflect saved changes and validation status
+            st.warning("Hierarchy structure seems invalid after edits. Check for missing levels.")
+        st.rerun() # Rerun to reflect the saved state and validation message
 
-
-    # --- Show Preview of Nested Structure for Validation ---
-    st.markdown("**Preview of Current Nested Structure:**")
+    # --- Show Preview of Nested Structure ---
+    st.markdown("**Preview of Current Nested Structure (for validation):**")
+    # Rebuild the nested structure from the current DataFrame in state
     current_nested_hierarchy = build_hierarchy_from_df(st.session_state.hierarchy_df)
+
     if current_nested_hierarchy and current_nested_hierarchy.get('themes'):
-        # Simple validation: check if it has themes
+        # If themes exist, display the JSON preview and mark as defined
         st.json(current_nested_hierarchy, expanded=False)
-        st.session_state.hierarchy_defined = True # Mark valid if structure exists
+        st.session_state.hierarchy_defined = True
     else:
-        st.warning("The hierarchy structure is currently empty or invalid. Use the editor above.")
+        # If no themes or invalid structure, show warning
+        st.warning("The hierarchy structure is currently empty or invalid. Use the editor above to define at least one complete path.")
         st.session_state.hierarchy_defined = False
 
-    return st.session_state.hierarchy_defined # Return validation status
+    # Return the current validation status
+    return st.session_state.hierarchy_defined

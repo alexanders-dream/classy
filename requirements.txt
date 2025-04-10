@@ -1,0 +1,15 @@
+streamlit
+pandas
+langchain
+langchain-groq
+python-dotenv
+openpyxl
+langchain-community
+pandas
+streamlit
+transformers[torch]
+scikit-learn
+plotly
+accelerate
+pydantic
+XlsxWriter
