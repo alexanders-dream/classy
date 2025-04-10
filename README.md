@@ -54,7 +54,7 @@ This application provides a user-friendly interface to:
 
 1.  **Clone the repository (or download the source code):**
     ```bash
-    git clone <your-repository-url> # Replace with the actual URL
+    git clone https://github.com/alexanders-dream/classy.git
     cd alexanders-dream-classy
     ```
 
